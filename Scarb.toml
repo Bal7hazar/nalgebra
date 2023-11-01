@@ -1,0 +1,8 @@
+[package]
+name = "nalgebra"
+version = "0.0.0"
+
+[lib]
+
+[dependencies]
+yas_core = { git = "https://github.com/lambdaclass/yet-another-swap.git", rev = "88a08d13b65b766bffda44681b78f0e53382a41d" }
