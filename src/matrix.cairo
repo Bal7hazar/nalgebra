@@ -1,76 +1,78 @@
-use dict::{Felt252Dict, Felt252DictTrait};
-use nullable::{NullableTrait, nullable_from_box, match_nullable, FromNullableResult};
-use yas_core::numbers::signed_integer::{i128::{i128, u128Intoi128}, integer_trait::IntegerTrait};
+use zeroable::Zeroable;
 
-#[derive(Destruct)]
-struct Matrix {
-    data: Felt252Dict<Nullable<i128>>,
+#[derive(Copy, Drop)]
+struct Matrix<T> {
+    data: Span<T>,
     rows: u8,
     cols: u8,
 }
 
 mod errors {
+    const INVALID_INDEX: felt252 = 'Matrix: index out of bounds';
     const INVALID_DIMENSION: felt252 = 'Matrix: invalid dimension';
     const INVALID_MATRIX_INVERSION: felt252 = 'Matrix: matrix not invertible';
 }
 
-trait MatrixTrait {
-    fn new(rows: u8, cols: u8) -> Matrix;
+trait MatrixTrait<T> {
+    fn new(data: Span<T>, rows: u8, cols: u8) -> Matrix<T>;
 
-    fn get(ref self: Matrix, row: u8, col: u8) -> i128;
+    fn get(ref self: Matrix<T>, row: u8, col: u8) -> T;
 
-    fn set(ref self: Matrix, row: u8, col: u8, value: i128) -> ();
+    fn transpose(ref self: Matrix<T>) -> Matrix<T>;
 
-    fn transpose(ref self: Matrix) -> Matrix;
+    fn minor(ref self: Matrix<T>, exclude_row: u8, exclude_col: u8) -> Matrix<T>;
 
-    fn minor(ref self: Matrix, exclude_row: u8, exclude_col: u8) -> Matrix;
+    fn det(ref self: Matrix<T>) -> T;
 
-    fn det(ref self: Matrix) -> i128;
-
-    fn inv(ref self: Matrix) -> Matrix;
+    fn inv(ref self: Matrix<T>) -> Matrix<T>;
 }
 
-impl MatrixImpl of MatrixTrait {
-    fn new(rows: u8, cols: u8) -> Matrix {
-        Matrix { data: Default::default(), rows, cols }
+impl MatrixImpl<
+    T,
+    +Mul<T>,
+    +Div<T>,
+    +Add<T>,
+    +AddEq<T>,
+    +Sub<T>,
+    +SubEq<T>,
+    +Neg<T>,
+    +Zeroable<T>,
+    +Copy<T>,
+    +Drop<T>,
+> of MatrixTrait<T> {
+    fn new(data: Span<T>, rows: u8, cols: u8) -> Matrix<T> {
+        // [Check] Data is consistent with dimensions
+        assert(data.len() == (rows * cols).into(), errors::INVALID_DIMENSION);
+        Matrix { data, rows, cols }
     }
 
-    fn get(ref self: Matrix, row: u8, col: u8) -> i128 {
-        let key: u8 = row * self.cols + col;
-        match match_nullable(self.data.get(key.into())) {
-            FromNullableResult::Null => 0_u128.into(),
-            FromNullableResult::NotNull(value) => value.unbox(),
-        }
+    fn get(ref self: Matrix<T>, row: u8, col: u8) -> T {
+        let index: u8 = row * self.cols + col;
+        *self.data.get(index.into()).expect(errors::INVALID_INDEX).unbox()
     }
 
-    fn set(ref self: Matrix, row: u8, col: u8, value: i128) {
-        let key: u8 = row * self.cols.into() + col;
-        self.data.insert(key.into(), nullable_from_box(BoxTrait::new(value)));
-    }
-
-    fn transpose(ref self: Matrix) -> Matrix {
-        let mut result = MatrixTrait::new(self.cols, self.rows);
-        let max_index = self.rows * self.cols;
+    fn transpose(ref self: Matrix<T>) -> Matrix<T> {
+        let mut values = array![];
+        let max_index: u8 = self.rows * self.cols;
         let mut index: u8 = 0;
         loop {
             if index == max_index {
                 break;
             }
-            let row = index / self.cols;
-            let col = index % self.cols;
-            result.set(col, row, self.get(row, col));
+            let row = index % self.rows;
+            let col = index / self.rows;
+            values.append(self.get(row, col));
             index += 1;
         };
-        result
+        MatrixTrait::new(values.span(), self.cols, self.rows)
     }
 
-    fn minor(ref self: Matrix, exclude_row: u8, exclude_col: u8) -> Matrix {
-        let mut minor_matrix = MatrixTrait::new(self.rows - 1, self.cols - 1);
-
+    fn minor(ref self: Matrix<T>, exclude_row: u8, exclude_col: u8) -> Matrix<T> {
+        let mut values = array![];
         let mut index: u8 = 0;
         let max_index: u8 = self.rows * self.cols;
         loop {
-            if index >= max_index {
+            if index == max_index {
                 break;
             };
 
@@ -78,28 +80,16 @@ impl MatrixImpl of MatrixTrait {
             let col = index % self.cols;
 
             if row != exclude_row && col != exclude_col {
-                let row_offset = if row > exclude_row {
-                    1
-                } else {
-                    0
-                };
-                let col_offset = if col > exclude_col {
-                    1
-                } else {
-                    0
-                };
-
-                let value = self.get(row, col);
-                minor_matrix.set(row - row_offset, col - col_offset, value);
+                values.append(self.get(row, col));
             };
 
             index += 1;
         };
 
-        minor_matrix
+        MatrixTrait::new(values.span(), self.cols - 1, self.rows - 1)
     }
 
-    fn det(ref self: Matrix) -> i128 {
+    fn det(ref self: Matrix<T>) -> T {
         // [Check] Matrix is square
         assert(self.rows == self.cols, errors::INVALID_DIMENSION);
         if self.rows == 1 {
@@ -110,7 +100,7 @@ impl MatrixImpl of MatrixTrait {
             return (self.get(0, 0) * self.get(1, 1)) - (self.get(0, 1) * self.get(1, 0));
         }
 
-        let mut det: i128 = 0_u128.into();
+        let mut det: T = Zeroable::zero();
         let mut col: u8 = 0;
         loop {
             if col >= self.cols {
@@ -131,45 +121,57 @@ impl MatrixImpl of MatrixTrait {
         return det;
     }
 
-    fn inv(ref self: Matrix) -> Matrix {
+    fn inv(ref self: Matrix<T>) -> Matrix<T> {
         let determinant = self.det();
-        assert(determinant != 0_u128.into(), errors::INVALID_MATRIX_INVERSION);
+        assert(determinant.is_non_zero(), errors::INVALID_MATRIX_INVERSION);
 
-        let mut inverse_matrix = MatrixTrait::new(self.rows, self.cols);
-        let max_index = self.rows * self.cols;
+        let mut values: Array<T> = array![];
+
+        let max_index: u8 = self.rows * self.cols;
         let mut index: u8 = 0;
+
         loop {
             if index == max_index {
                 break;
             }
-            let row = index / self.cols;
-            let col = index % self.cols;
 
-            // Cofactor computation
-            let sign = if (row + col) % 2 == 0 {
-                1_u128.into()
-            } else {
-                -1
-            };
+            // Extract row and column from the linear index
+            let col = index / self.rows;
+            let row = index % self.rows;
+
+            // Compute the cofactor
             let mut minor = self.minor(row, col);
             let cofactor = if (row + col) % 2 == 0 {
                 minor.det()
             } else {
                 -minor.det()
             };
-            inverse_matrix.set(row, col, cofactor / determinant);
+            values.append(cofactor / determinant);
 
             index += 1;
         };
-        inverse_matrix
+
+        MatrixTrait::new(values.span(), self.cols, self.rows)
     }
 }
 
-impl MatrixAdd of Add<Matrix> {
-    fn add(mut lhs: Matrix, mut rhs: Matrix) -> Matrix {
+impl MatrixAdd<
+    T,
+    +Mul<T>,
+    +Div<T>,
+    +Add<T>,
+    +AddEq<T>,
+    +Sub<T>,
+    +SubEq<T>,
+    +Neg<T>,
+    +Zeroable<T>,
+    +Copy<T>,
+    +Drop<T>,
+> of Add<Matrix<T>> {
+    fn add(mut lhs: Matrix<T>, mut rhs: Matrix<T>) -> Matrix<T> {
         // [Check] Dimesions are compatible
         assert(lhs.rows == rhs.rows && lhs.cols == rhs.cols, errors::INVALID_DIMENSION);
-        let mut result = MatrixTrait::new(lhs.rows, lhs.cols);
+        let mut values = array![];
         let max_index = lhs.rows * lhs.cols;
         let mut index = 0;
         loop {
@@ -178,19 +180,30 @@ impl MatrixAdd of Add<Matrix> {
             }
             let row = index / lhs.cols;
             let col = index % lhs.cols;
-            let value = lhs.get(row, col) + rhs.get(row, col);
-            result.set(row, col, value);
+            values.append(lhs.get(row, col) + rhs.get(row, col));
             index += 1;
         };
-        result
+        MatrixTrait::new(values.span(), lhs.rows, lhs.cols)
     }
 }
 
-impl MatrixSub of Sub<Matrix> {
-    fn sub(mut lhs: Matrix, mut rhs: Matrix) -> Matrix {
+impl MatrixSub<
+    T,
+    +Mul<T>,
+    +Div<T>,
+    +Add<T>,
+    +AddEq<T>,
+    +Sub<T>,
+    +SubEq<T>,
+    +Neg<T>,
+    +Zeroable<T>,
+    +Copy<T>,
+    +Drop<T>,
+> of Sub<Matrix<T>> {
+    fn sub(mut lhs: Matrix<T>, mut rhs: Matrix<T>) -> Matrix<T> {
         // [Check] Dimesions are compatible
         assert(lhs.rows == rhs.rows && lhs.cols == rhs.cols, errors::INVALID_DIMENSION);
-        let mut result = MatrixTrait::new(lhs.rows, lhs.cols);
+        let mut values = array![];
         let max_index = lhs.rows * lhs.cols;
         let mut index = 0;
         loop {
@@ -199,19 +212,30 @@ impl MatrixSub of Sub<Matrix> {
             }
             let row = index / lhs.cols;
             let col = index % lhs.cols;
-            let value = lhs.get(row, col) - rhs.get(row, col);
-            result.set(row, col, value);
+            values.append(lhs.get(row, col) - rhs.get(row, col));
             index += 1;
         };
-        result
+        MatrixTrait::new(values.span(), lhs.rows, lhs.cols)
     }
 }
 
-impl MatrixMul of Mul<Matrix> {
-    fn mul(mut lhs: Matrix, mut rhs: Matrix) -> Matrix {
+impl MatrixMul<
+    T,
+    +Mul<T>,
+    +Div<T>,
+    +Add<T>,
+    +AddEq<T>,
+    +Sub<T>,
+    +SubEq<T>,
+    +Neg<T>,
+    +Zeroable<T>,
+    +Copy<T>,
+    +Drop<T>,
+> of Mul<Matrix<T>> {
+    fn mul(mut lhs: Matrix<T>, mut rhs: Matrix<T>) -> Matrix<T> {
         // [Check] Dimesions are compatible
         assert(lhs.cols == rhs.rows, errors::INVALID_DIMENSION);
-        let mut result = MatrixTrait::new(lhs.rows, rhs.cols);
+        let mut values = array![];
         let max_index = lhs.rows * rhs.cols;
         let mut index: u8 = 0;
         loop {
@@ -222,7 +246,7 @@ impl MatrixMul of Mul<Matrix> {
             let row = index / rhs.cols;
             let col = index % rhs.cols;
 
-            let mut sum: i128 = 0_u128.into();
+            let mut sum: T = Zeroable::zero();
             let mut k: u8 = 0;
             loop {
                 if k == lhs.cols {
@@ -232,31 +256,50 @@ impl MatrixMul of Mul<Matrix> {
                 sum += lhs.get(row, k) * rhs.get(k, col);
                 k += 1;
             };
-
-            result.set(row, col, sum);
+            values.append(sum);
             index += 1;
         };
 
-        result
+        MatrixTrait::new(values.span(), lhs.rows, rhs.cols)
     }
 }
 
-
 #[cfg(test)]
 mod tests {
+    use core::traits::TryInto;
     use super::{Matrix, MatrixTrait, errors};
     use debug::PrintTrait;
 
+    impl I128Zeroable of Zeroable<i128> {
+        fn zero() -> i128 {
+            0
+        }
+        fn is_zero(self: i128) -> bool {
+            self == 0
+        }
+        fn is_non_zero(self: i128) -> bool {
+            self != 0
+        }
+    }
+
+    impl I128Div of Div<i128> {
+        fn div(lhs: i128, rhs: i128) -> i128 {
+            let lhs_u256: u256 = Into::<felt252, u256>::into(lhs.into());
+            let rhs_u256: u256 = Into::<felt252, u256>::into(rhs.into());
+            let div: felt252 = (lhs_u256 / rhs_u256).try_into().unwrap();
+            div.try_into().unwrap()
+        }
+    }
+
     #[test]
     #[available_gas(1_000_000)]
-    fn test_matrix_get_set() {
+    fn test_matrix_get() {
         let rows: u8 = 3;
         let cols: u8 = 4;
-        let mut matrix: Matrix = MatrixTrait::new(rows, cols);
-        matrix.set(0, 1, 100_u128.into());
-        matrix.set(2, 3, 50_u128.into());
-        assert(matrix.get(0, 1) == 100_u128.into(), 'Matrix: get or set failed');
-        assert(matrix.get(2, 3) == 50_u128.into(), 'Matrix: get or set failed');
+        let values: Array<i128> = array![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
+        let mut matrix: Matrix = MatrixTrait::new(values.span(), rows, cols);
+        assert(matrix.get(0, 1) == 2, 'Matrix: get failed');
+        assert(matrix.get(2, 3) == 12, 'Matrix: get failed');
     }
 
     #[test]
@@ -264,12 +307,11 @@ mod tests {
     fn test_matrix_transpose() {
         let rows: u8 = 2;
         let cols: u8 = 3;
-        let mut matrix = MatrixTrait::new(rows, cols);
-        matrix.set(0, 2, 100_u128.into());
-        matrix.set(1, 1, 50_u128.into());
+        let values: Array<i128> = array![1, 2, 3, 4, 5, 6];
+        let mut matrix: Matrix = MatrixTrait::new(values.span(), rows, cols);
         let mut transposed = matrix.transpose();
-        assert(transposed.get(2, 0) == 100_u128.into(), 'Matrix: transpose failed');
-        assert(transposed.get(1, 1) == 50_u128.into(), 'Matrix: transpose failed');
+        assert(transposed.get(0, 1) == 4, 'Matrix: transpose failed');
+        assert(transposed.get(2, 1) == 6, 'Matrix: transpose failed');
     }
 
     #[test]
@@ -277,15 +319,12 @@ mod tests {
     fn test_matrix_addition() {
         let rows: u8 = 2;
         let cols: u8 = 3;
-        let mut matrix1 = MatrixTrait::new(rows, cols);
-        let mut matrix2 = MatrixTrait::new(rows, cols);
-        matrix1.set(0, 0, 10_u128.into());
-        matrix1.set(1, 1, 20_u128.into());
-        matrix2.set(0, 0, 5_u128.into());
-        matrix2.set(1, 1, 15_u128.into());
+        let values: Array<i128> = array![1, 2, 3, 4, 5, 6];
+        let mut matrix1 = MatrixTrait::new(values.span(), rows, cols);
+        let mut matrix2 = MatrixTrait::new(values.span(), rows, cols);
         let mut result = matrix1 + matrix2;
-        assert(result.get(0, 0) == 15_u128.into(), 'Matrix: addition failed');
-        assert(result.get(1, 1) == 35_u128.into(), 'Matrix: addition failed');
+        assert(result.get(0, 0) == 2, 'Matrix: addition failed');
+        assert(result.get(1, 1) == 10, 'Matrix: addition failed');
     }
 
     #[test]
@@ -293,102 +332,84 @@ mod tests {
     fn test_matrix_subtraction() {
         let rows: u8 = 2;
         let cols: u8 = 3;
-        let mut matrix1 = MatrixTrait::new(rows, cols);
-        let mut matrix2 = MatrixTrait::new(rows, cols);
-        matrix1.set(0, 0, 20_u128.into());
-        matrix1.set(1, 1, 30_u128.into());
-        matrix2.set(0, 0, 5_u128.into());
-        matrix2.set(1, 1, 10_u128.into());
+        let values: Array<i128> = array![1, 2, 3, 4, 5, 6];
+        let mut matrix1 = MatrixTrait::new(values.span(), rows, cols);
+        let values: Array<i128> = array![7, 8, 9, 10, 11, 12];
+        let mut matrix2 = MatrixTrait::new(values.span(), rows, cols);
         let mut result = matrix1 - matrix2;
-        assert(result.get(0, 0) == 15_u128.into(), 'Matrix: subtraction failed');
-        assert(result.get(1, 1) == 20_u128.into(), 'Matrix: subtraction failed');
+        assert(result.get(0, 0) == -6, 'Matrix: subtraction failed');
+        assert(result.get(1, 1) == -6, 'Matrix: subtraction failed');
     }
 
     #[test]
     #[available_gas(10_000_000)]
     fn test_matrix_square_multiplication() {
         let size: u8 = 2;
-        let mut matrix1 = MatrixTrait::new(size, size);
-        let mut matrix2 = MatrixTrait::new(size, size);
-        matrix1.set(0, 0, 1_u128.into());
-        matrix1.set(0, 1, 2_u128.into());
-        matrix1.set(1, 0, 3_u128.into());
-        matrix1.set(1, 1, 4_u128.into());
-        matrix2.set(0, 0, 2_u128.into());
-        matrix2.set(0, 1, 0_u128.into());
-        matrix2.set(1, 0, 1_u128.into());
-        matrix2.set(1, 1, 3_u128.into());
+        let values: Array<i128> = array![1, 2, 3, 4];
+        let mut matrix1 = MatrixTrait::new(values.span(), size, size);
+        let mut matrix2 = MatrixTrait::new(values.span(), size, size);
         let mut result = matrix1 * matrix2;
-        assert(result.get(0, 0) == 4_u128.into(), 'Matrix: multiplication failed');
-        assert(result.get(0, 1) == 6_u128.into(), 'Matrix: multiplication failed');
-        assert(result.get(1, 0) == 10_u128.into(), 'Matrix: multiplication failed');
-        assert(result.get(1, 1) == 12_u128.into(), 'Matrix: multiplication failed');
+        assert(result.get(0, 0) == 7, 'Matrix: multiplication failed');
+        assert(result.get(0, 1) == 10, 'Matrix: multiplication failed');
+        assert(result.get(1, 0) == 15, 'Matrix: multiplication failed');
+        assert(result.get(1, 1) == 22, 'Matrix: multiplication failed');
     }
 
     #[test]
     #[available_gas(10_000_000)]
     fn test_matrix_rectangle_multiplication() {
-        let mut matrix1 = MatrixTrait::new(2, 3);
-        let mut matrix2 = MatrixTrait::new(3, 2);
-        matrix1.set(0, 0, 1_u128.into());
-        matrix1.set(0, 1, 2_u128.into());
-        matrix1.set(0, 2, 3_u128.into());
-        matrix1.set(1, 0, 4_u128.into());
-        matrix1.set(1, 1, 5_u128.into());
-        matrix1.set(1, 2, 6_u128.into());
-        matrix2.set(0, 0, 7_u128.into());
-        matrix2.set(0, 1, 8_u128.into());
-        matrix2.set(1, 0, 9_u128.into());
-        matrix2.set(1, 1, 10_u128.into());
-        matrix2.set(2, 0, 11_u128.into());
-        matrix2.set(2, 1, 12_u128.into());
+        let values: Array<i128> = array![1, 2, 3, 4, 5, 6];
+        let mut matrix1 = MatrixTrait::new(values.span(), 2, 3);
+        let mut matrix2 = MatrixTrait::new(values.span(), 3, 2);
         let mut result = matrix1 * matrix2;
-        assert(result.get(0, 0) == 58_u128.into(), 'Matrix: multiplication failed');
-        assert(result.get(0, 1) == 64_u128.into(), 'Matrix: multiplication failed');
-        assert(result.get(1, 0) == 139_u128.into(), 'Matrix: multiplication failed');
-        assert(result.get(1, 1) == 154_u128.into(), 'Matrix: multiplication failed');
+        assert(result.get(0, 0) == 22, 'Matrix: multiplication failed');
+        assert(result.get(0, 1) == 28, 'Matrix: multiplication failed');
+        assert(result.get(1, 0) == 49, 'Matrix: multiplication failed');
+        assert(result.get(1, 1) == 64, 'Matrix: multiplication failed');
     }
 
     #[test]
     #[available_gas(5_000_000)]
     fn test_matrix_determinant_2x2() {
-        let mut matrix = MatrixTrait::new(2, 2);
-        matrix.set(0, 0, 4_u128.into());
-        matrix.set(0, 1, 3_u128.into());
-        matrix.set(1, 0, 1_u128.into());
-        matrix.set(1, 1, 2_u128.into());
-        assert(matrix.det() == 5_u128.into(), 'Matrix: det computation failed');
+        let values: Array<i128> = array![4, 3, 1, 2];
+        let mut matrix = MatrixTrait::new(values.span(), 2, 2);
+        assert(matrix.det() == 5, 'Matrix: det computation failed');
     }
 
     #[test]
     #[available_gas(10_000_000)]
     fn test_matrix_determinant_3x3() {
-        let mut matrix = MatrixTrait::new(3, 3);
-        matrix.set(0, 0, 6_u128.into());
-        matrix.set(0, 1, 1_u128.into());
-        matrix.set(0, 2, 1_u128.into());
-        matrix.set(1, 0, 4_u128.into());
-        matrix.set(1, 1, -2_u128.into());
-        matrix.set(1, 2, 5_u128.into());
-        matrix.set(2, 0, 2_u128.into());
-        matrix.set(2, 1, 8_u128.into());
-        matrix.set(2, 2, 7_u128.into());
-        let det = matrix.det();
-        assert(matrix.det() == -306_u128.into(), 'Matrix: det computation failed');
+        let values: Array<i128> = array![6, 1, 1, 4, -2, 5, 2, 8, 7];
+        let mut matrix = MatrixTrait::new(values.span(), 3, 3);
+        assert(matrix.det() == -306, 'Matrix: det computation failed');
     }
 
     #[test]
     #[available_gas(10_000_000)]
     fn test_matrix_inverse_2x2() {
-        let mut matrix = MatrixTrait::new(2, 2);
-        matrix.set(0, 0, 1_u128.into());
-        matrix.set(0, 1, 2_u128.into());
-        matrix.set(1, 0, 3_u128.into());
-        matrix.set(1, 1, 4_u128.into());
+        let values: Array<i128> = array![1, 2, 0, 1];
+        let mut matrix = MatrixTrait::new(values.span(), 2, 2);
         let mut inverse = matrix.inv();
-        assert(inverse.get(0, 0) == -2_u128.into(), 'Matrix: inversion failed');
-        assert(inverse.get(0, 1) == 1_u128.into(), 'Matrix: inversion failed');
-        assert(inverse.get(1, 0) == 1_u128.into(), 'Matrix: inversion failed');
-        assert(inverse.get(1, 1) == 0_u128.into(), 'Matrix: inversion failed');
+        assert(inverse.get(0, 0) == 1, 'Matrix: inversion failed');
+        assert(inverse.get(0, 1) == -2, 'Matrix: inversion failed');
+        assert(inverse.get(1, 0) == 0, 'Matrix: inversion failed');
+        assert(inverse.get(1, 1) == 1, 'Matrix: inversion failed');
+    }
+
+    #[test]
+    #[available_gas(10_000_000)]
+    fn test_matrix_inverse_3x3() {
+        let values: Array<i128> = array![1, 1, 0, 0, 1, 0, 0, 1, 1];
+        let mut matrix = MatrixTrait::new(values.span(), 3, 3);
+        let mut inverse = matrix.inv();
+        assert(inverse.get(0, 0) == 1, 'Matrix: inversion failed');
+        assert(inverse.get(0, 1) == -1, 'Matrix: inversion failed');
+        assert(inverse.get(0, 2) == 0, 'Matrix: inversion failed');
+        assert(inverse.get(1, 0) == 0, 'Matrix: inversion failed');
+        assert(inverse.get(1, 1) == 1, 'Matrix: inversion failed');
+        assert(inverse.get(1, 2) == 0, 'Matrix: inversion failed');
+        assert(inverse.get(2, 0) == 0, 'Matrix: inversion failed');
+        assert(inverse.get(2, 1) == -1, 'Matrix: inversion failed');
+        assert(inverse.get(2, 2) == 1, 'Matrix: inversion failed');
     }
 }
